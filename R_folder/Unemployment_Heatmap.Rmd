@@ -1,0 +1,188 @@
+---
+title: "Unemployment Heat Mapping"
+author: 'Sun Park'
+date: "October 2023"
+output: pdf_document
+---
+
+\newpage
+
+```{r echo=FALSE, warning=FALSE, , message=FALSE}
+
+# Load the required library
+library(httr)
+library(readr)
+library(dplyr)
+
+get_unemployment_data <- function(date_mth = NULL){
+    # Set the URL and User-Agent
+    url <- 'https://www.bls.gov/web/metro/laucntycur14.txt'
+    user_agent <- 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+    
+    # Send a GET request with the specified User-Agent
+    response <- GET(url, user_agent(user_agent))
+    
+    # Extract the content as text
+    data <- content(response, as = 'text')
+    
+    # Split the text into lines
+    lines <- unlist(strsplit(data, "\n"))
+    # Get data parts
+    data <- lines[6:length(lines)]
+    
+    # Split the data by '|'
+    countyemp <- data.frame(do.call(rbind, strsplit(data, "\\|", perl = TRUE)))
+    
+    # Set column names
+    colnames(countyemp) <- c("area_code", "fips_state", "fips_county", "area_title", "period", "labor_force", "employed", "unemployed", "unemployed_rate")
+    
+    # Drop rows with missing data
+    countyemp <- countyemp[-1,]
+    # Remove white spaces from all columns
+    countyemp <- lapply(countyemp, function(x) gsub("\\s", "", x))
+    countyemp <- as.data.frame(countyemp)
+    #get the right format of date
+    countyemp <- countyemp %>% dplyr::mutate(period=as.Date(paste("01-", period, sep = ""), format = "%d-%b-%y")) 
+    
+    # Get the FIPS code: Have to add leading zeros to any single digit number and combine them.
+    countyemp$fips_county <- formatC(countyemp$fips_county, width = 3, format = "d", flag = "0")
+    countyemp$fips_state <- formatC(countyemp$fips_state, width = 2, format = "d", flag = "0")
+    # Remove white spaces from all columns
+    countyemp <- lapply(countyemp, function(x) gsub("\\s", "", x))
+    countyemp <- as.data.frame(countyemp)
+    countyemp$fips <- paste(countyemp$fips_state,countyemp$fips_county,sep="")
+    #remove any null values in period
+    countyemp <- countyemp[!is.na(countyemp$period), ]
+  
+    
+    # Check for date or dates.
+    if (!is.null(date_mth)){
+        date_mth <- as.Date(paste("01", date_mth, sep = ""), format = '%d %b %Y')
+        # Check to see if users date exists in data set.
+        dt_exist <- sapply(date_mth, function(x) any(grepl(x, countyemp$period)))
+        if(any(dt_exist==FALSE)){
+            message("Are you sure your date(s) is published? Please check the BLS release schedule.")
+            if(i>Sys.Date()-54){
+                stop(message("County-wide statistics are usually published on the third Friday of each month for the previous month."))
+            }
+            if(i<Sys.Date()-360){
+                stop(message("This data set only goes back one year. Make sure your date(s) is correct."))
+            }
+        }
+    }
+    
+    if (is.null(date_mth)){
+        date_mth <- max(countyemp$period)
+        date_mth <- as.Date(date_mth, format = '%d %b %Y')
+    }
+    
+    # Put months to loop in list.
+    datalist <- purrr::map(date_mth, function(i){
+        mth_vals <- subset(countyemp, period==i)
+    })
+    
+    # Rebind.
+    df <- do.call(rbind, datalist)
+    
+    # Correct column data types.
+    df %<>% dplyr::mutate(unemployed=as.numeric(gsub(",", "", as.character(unemployed))), employed=as.numeric(gsub(",", "", as.character(employed))),
+                          labor_force=as.numeric(gsub(",", "", as.character(labor_force)))) %>% tibble::as_tibble()
+    
+    return(df)
+}
+```
+
+
+
+
+```{r 3, results='asis', echo=FALSE, fig.width=8, fig.height=5, warning=FALSE, message=FALSE}
+
+# Load required libraries
+library(maps)
+library(RColorBrewer)
+library(dplyr)  # Load the dplyr package
+library(zoo)    # Load the zoo package
+
+# Generate a sequence of dates spanning the last year to the last 90 days
+month <- seq.Date(Sys.Date() - 365, Sys.Date() - 90, by = "month")
+month <- as.data.frame(month)
+month$month <- format(month$month, format = "%B %Y")
+
+# Load county FIPS data
+# county.fips: FIPS county codes for US County Map from library(Map)
+data("county.fips")
+
+# Select the last and second-to-last months
+i <- nrow(month)
+j <- nrow(month) - 1
+
+# Get unemployment data for the last two months
+unemp1 <- get_unemployment_data(month[i, 1])
+unemp2 <- get_unemployment_data(month[j, 1])
+
+# Calculate unemployment rates
+unemp1$unemployed_rate <- unemp1$unemployed / unemp1$labor_force
+unemp2$unemployed_rate <- unemp2$unemployed / unemp2$labor_force
+
+# Extract year and month from the date
+unemp1$period <- as.yearmon(unemp1$period)
+unemp2$period <- as.yearmon(unemp2$period)
+x <- as.character(unemp1$period[1])
+y <- as.character(unemp2$period[1])
+
+# Select relevant columns
+unemp1 <- unemp1[, c(10, 8, 9)]
+unemp1$fips <- as.numeric(unemp1$fips)
+unemp2$fips <- as.numeric(unemp2$fips)
+unemp1$unemployed_rate <- as.numeric(unemp1$unemployed_rate) * 100
+unemp2$unemployed_rate <- as.numeric(unemp2$unemployed_rate) * 100
+
+# Define color buckets for the first map
+colors <- c("#CCE5FF", "#99CCFF", "#66B2FF", "#3399FF", "#0080FF", "#004C99")
+unemp1$colorBuckets <- cut(unemp1$unemployed_rate, c(0, 2, 4, 6, 8, 10, 100))
+leg.txt <- c("<2%", "2-4%", "4-6%", "6-8%", "8-10%", ">10%")
+
+# Match county FIPS codes to map data for the first map
+cnty.fips <- county.fips$fips[match(map("county", plot = FALSE)$names, county.fips$polyname)]
+colorsmatched <- unemp1$colorBuckets[match(cnty.fips, unemp1$fips)]
+
+# Create the first heatmap
+map("county", col = colors[colorsmatched], fill = TRUE, resolution = 0, lty = 0, projection = "polyconic")
+map("state", col = "black", fill = FALSE, add = TRUE, lty = 1, lwd = 0.2, projection = "polyconic")
+title(paste("Unemployment by County,", x), sep = " ")
+legend("topright", leg.txt, horiz = FALSE, fill = colors, cex = 0.6)
+
+
+```
+
+```{r 3.2, results='asis', echo=FALSE, fig.width=8, fig.height=5, warning=FALSE, message=FALSE}
+
+# Select relevant columns for the second map
+unemp2 <- unemp2[, c(10, 8, 9)]
+unemp1 <- unemp1[, -4]
+
+# Merge data from the two months based on FIPS codes
+unemp2 <- merge(unemp2, unemp1, by = "fips")
+
+# Calculate the change in unemployment rate
+unemp2$delta <- ((unemp2$unemployed_rate.y - unemp2$unemployed_rate.x) / unemp2$unemployed_rate.x) * 100
+
+# Define color buckets for the second map
+colors2 <- c("#5aabfc", "#87c3ff", "#b8d9fc", "#dce4ef", "#ffb5bb", "#f75663", "#ff2626")
+unemp2$colorBuckets <- as.numeric(cut(unemp2$delta, c(-100, -15, -10, -5, 5, 10, 15, 100)))
+leg.txt2 <- c("<(-15%)", "(-15%)-(-10%)", "(-10%)-(-5%)", "(-5%) - 5%", "5%-10%", "10%-15%", ">15%")
+
+# Match county FIPS codes to map data for the second map
+cnty.fips2 <- county.fips$fips[match(map("county", plot = FALSE)$names, county.fips$polyname)]
+colorsmatched2 <- unemp2$colorBuckets[match(cnty.fips2, unemp2$fips)]
+
+# Create the second heatmap
+map("county", col = colors2[colorsmatched2], fill = TRUE, resolution = 0, lty = 0, projection = "polyconic")
+map("state", col = "black", fill = FALSE, add = TRUE, lty = 1, lwd = 0.2, projection = "polyconic")
+title(paste("Unemployment Change by County,", y, 'to', x), sep = " ")
+legend("topright", leg.txt2, horiz = FALSE, fill = colors2, cex = 0.6)
+
+```
+
+
+*The unemployment rate represents the number of unemployed as a percentage of the labor force. Labor force data are restricted to people 16 years of age and older, who currently reside in 1 of the 50 states or the District of Columbia, who do not reside in institutions (e.g., penal and mental facilities, homes for the aged), and who are not on active duty in the Armed Forces.
